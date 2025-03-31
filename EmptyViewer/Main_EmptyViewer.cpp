@@ -1,10 +1,11 @@
-// q2_gamma_correction/main.cpp
+// q3_antialiasing/main.cpp
 #include <Windows.h>
 #include <iostream>
 #include <GL/glew.h>
 #include <GL/GL.h>
 #include <GL/freeglut.h>
 #include <cmath>
+#include <cstdlib>
 #define GLFW_INCLUDE_GLU
 #define GLFW_DLL
 #include <GLFW/glfw3.h>
@@ -90,9 +91,9 @@ public:
     Camera(const vec3& e, float l_, float r_, float b_, float t_, float d_)
         : eye(e), l(l_), r(r_), b(b_), t(t_), d(d_) {}
 
-    Ray generateRay(int i, int j, int nx, int ny) const {
-        float u = l + (r - l) * ((i + 0.5f) / float(nx));
-        float v = b + (t - b) * ((j + 0.5f) / float(ny));
+    Ray generateRay(float i, float j, int nx, int ny) const {
+        float u = l + (r - l) * (i / float(nx));
+        float v = b + (t - b) * (j / float(ny));
         vec3 imagePoint(u, v, -d);
         return Ray(eye, imagePoint - eye);
     }
@@ -125,7 +126,6 @@ public:
 
         vec3 hitPos = ray.origin + tMin * ray.direction;
 
-        // Shadow ray
         vec3 toLight = normalize(lightPos - hitPos);
         Ray shadowRay(hitPos + 1e-4f * normal, toLight);
         for (auto obj : objects) {
@@ -134,14 +134,11 @@ public:
             if (t > 0.0f) return hitObj->material.ka * lightColor;
         }
 
-        // Lighting
         vec3 viewDir = normalize(-ray.direction);
         vec3 halfVec = normalize(toLight + viewDir);
         float diff = max(dot(normal, toLight), 0.0f);
         float spec = pow(max(dot(normal, halfVec), 0.0f), hitObj->material.specPower);
-        vec3 color = hitObj->material.ka +
-            hitObj->material.kd * diff +
-            hitObj->material.ks * spec;
+        vec3 color = hitObj->material.ka + hitObj->material.kd * diff + hitObj->material.ks * spec;
         return clamp(color * lightColor, 0.0f, 1.0f);
     }
 };
@@ -151,6 +148,7 @@ std::vector<float> OutputImage;
 Camera* camera = nullptr;
 Scene* scene = nullptr;
 const float gammaValue = 2.2f;
+const int NUM_SAMPLES = 64;
 
 vec3 applyGammaCorrection(const vec3& color) {
     return vec3(pow(color.r, 1.0f / gammaValue),
@@ -162,13 +160,20 @@ void render() {
     OutputImage.resize(Width * Height * 3);
     for (int j = 0; j < Height; ++j) {
         for (int i = 0; i < Width; ++i) {
-            Ray ray = camera->generateRay(i, j, Width, Height);
-            vec3 color = scene->trace(ray);
-            color = applyGammaCorrection(color);
+            vec3 colorSum(0.0f);
+            for (int s = 0; s < NUM_SAMPLES; ++s) {
+                float dx = static_cast<float>(rand()) / RAND_MAX;
+                float dy = static_cast<float>(rand()) / RAND_MAX;
+                Ray ray = camera->generateRay(i + dx, j + dy, Width, Height);
+                vec3 sampleColor = scene->trace(ray);
+                colorSum += sampleColor;
+            }
+            vec3 finalColor = colorSum / float(NUM_SAMPLES);
+            finalColor = applyGammaCorrection(finalColor);
             int idx = (j * Width + i) * 3;
-            OutputImage[idx + 0] = color.r;
-            OutputImage[idx + 1] = color.g;
-            OutputImage[idx + 2] = color.b;
+            OutputImage[idx + 0] = finalColor.r;
+            OutputImage[idx + 1] = finalColor.g;
+            OutputImage[idx + 2] = finalColor.b;
         }
     }
 }
@@ -187,7 +192,7 @@ void resize_callback(GLFWwindow*, int nw, int nh) {
 int main(int argc, char* argv[]) {
     GLFWwindow* window;
     if (!glfwInit()) return -1;
-    window = glfwCreateWindow(Width, Height, "Q2: Gamma Correction", NULL, NULL);
+    window = glfwCreateWindow(Width, Height, "Q3: Anti-aliasing", NULL, NULL);
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
