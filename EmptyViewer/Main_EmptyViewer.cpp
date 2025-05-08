@@ -1,4 +1,7 @@
-// q3_antialiasing/main.cpp
+// main.cpp
+// HW5 Q1: Transformations + Software Rasterizer + Z-Buffer
+// Single file, using only the specified headers.
+
 #include <Windows.h>
 #include <iostream>
 #include <GL/glew.h>
@@ -6,220 +9,208 @@
 #include <GL/freeglut.h>
 #include <cmath>
 #include <cstdlib>
+
 #define GLFW_INCLUDE_GLU
 #define GLFW_DLL
 #include <GLFW/glfw3.h>
+
 #include <vector>
+
 #define GLM_SWIZZLE
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/string_cast.hpp>
+
 using namespace glm;
 
-struct Material {
-    vec3 ka, kd, ks;
-    float specPower;
-};
+// ------------------------------------------------------------------
+// Generate a unit-sphere mesh (vertex list + triangle index list)
+// ------------------------------------------------------------------
+static int     gNumVertices = 0;
+static int     gNumTriangles = 0;
+static float* gVertexBuffer = nullptr; // 3 floats per vertex
+static int* gIndexBuffer = nullptr; // 3 indices per triangle
 
-class Ray {
-public:
-    vec3 origin, direction;
-    Ray(const vec3& o, const vec3& d) : origin(o), direction(normalize(d)) {}
-};
+void create_sphere(int width = 32, int height = 16) {
+    gNumVertices = (height - 2) * width + 2;
+    gNumTriangles = (height - 2) * (width - 1) * 2 + 2 * (width - 1);
 
-class Surface {
-public:
-    Material material;
-    virtual ~Surface() {}
-    virtual float intersect(const Ray& ray, vec3& normalOut) const = 0;
-    virtual vec3 getPosition(const Ray& ray, float t) const = 0;
-};
+    gVertexBuffer = new float[3 * gNumVertices];
+    gIndexBuffer = new int[3 * gNumTriangles];
 
-class Sphere : public Surface {
-public:
-    vec3 center;
-    float radius;
-    Sphere(const vec3& c, float r, const Material& m) : center(c), radius(r) { material = m; }
-
-    float intersect(const Ray& ray, vec3& normalOut) const override {
-        vec3 oc = ray.origin - center;
-        float b = 2.0f * dot(ray.direction, oc);
-        float c = dot(oc, oc) - radius * radius;
-        float disc = b * b - 4.0f * c;
-        if (disc < 0.0f) return -1.0f;
-        float sqrtDisc = sqrtf(disc);
-        float t1 = (-b - sqrtDisc) / 2.0f;
-        float t2 = (-b + sqrtDisc) / 2.0f;
-        float t = (t1 > 0.001f) ? t1 : (t2 > 0.001f) ? t2 : -1.0f;
-        if (t > 0.0f) {
-            vec3 pos = ray.origin + t * ray.direction;
-            normalOut = normalize(pos - center);
+    int v = 0;
+    for (int j = 1; j < height - 1; ++j) {
+        float theta = float(j) / float(height - 1) * pi<float>();
+        for (int i = 0; i < width; ++i) {
+            float phi = float(i) / float(width - 1) * two_pi<float>();
+            float x = sinf(theta) * cosf(phi);
+            float y = cosf(theta);
+            float z = -sinf(theta) * sinf(phi);
+            gVertexBuffer[3 * v + 0] = x;
+            gVertexBuffer[3 * v + 1] = y;
+            gVertexBuffer[3 * v + 2] = z;
+            ++v;
         }
-        return t;
     }
+    // top pole
+    gVertexBuffer[3 * v + 0] = 0.0f;
+    gVertexBuffer[3 * v + 1] = 1.0f;
+    gVertexBuffer[3 * v + 2] = 0.0f;
+    int topIndex = v++;
+    // bottom pole
+    gVertexBuffer[3 * v + 0] = 0.0f;
+    gVertexBuffer[3 * v + 1] = -1.0f;
+    gVertexBuffer[3 * v + 2] = 0.0f;
+    int botIndex = v++;
 
-    vec3 getPosition(const Ray& ray, float t) const override {
-        return ray.origin + t * ray.direction;
-    }
-};
-
-class Plane : public Surface {
-public:
-    float y;
-    Plane(float yVal, const Material& m) : y(yVal) { material = m; }
-
-    float intersect(const Ray& ray, vec3& normalOut) const override {
-        if (fabs(ray.direction.y) < 1e-6f) return -1.0f;
-        float t = (y - ray.origin.y) / ray.direction.y;
-        if (t > 0.001f) {
-            normalOut = vec3(0, 1, 0);
-            return t;
+    int idx = 0;
+    // sides
+    for (int j = 0; j < height - 2; ++j) {
+        for (int i = 0; i < width - 1; ++i) {
+            int v0 = j * width + i;
+            int v1 = j * width + (i + 1);
+            int v2 = (j + 1) * width + (i + 1);
+            int v3 = (j + 1) * width + i;
+            // tri 1
+            gIndexBuffer[idx++] = v0;
+            gIndexBuffer[idx++] = v2;
+            gIndexBuffer[idx++] = v1;
+            // tri 2
+            gIndexBuffer[idx++] = v0;
+            gIndexBuffer[idx++] = v3;
+            gIndexBuffer[idx++] = v2;
         }
-        return -1.0f;
     }
-
-    vec3 getPosition(const Ray& ray, float t) const override {
-        return ray.origin + t * ray.direction;
+    // top cap
+    for (int i = 0; i < width - 1; ++i) {
+        gIndexBuffer[idx++] = topIndex;
+        gIndexBuffer[idx++] = i;
+        gIndexBuffer[idx++] = i + 1;
     }
-};
-
-class Camera {
-public:
-    vec3 eye;
-    float l, r, b, t, d;
-    Camera(const vec3& e, float l_, float r_, float b_, float t_, float d_)
-        : eye(e), l(l_), r(r_), b(b_), t(t_), d(d_) {}
-
-    Ray generateRay(float i, float j, int nx, int ny) const {
-        float u = l + (r - l) * (i / float(nx));
-        float v = b + (t - b) * (j / float(ny));
-        vec3 imagePoint(u, v, -d);
-        return Ray(eye, imagePoint - eye);
-    }
-};
-
-class Scene {
-public:
-    std::vector<Surface*> objects;
-    vec3 lightPos = vec3(-4, 4, -3);
-    vec3 lightColor = vec3(1.0f);
-
-    ~Scene() {
-        for (auto obj : objects) delete obj;
-    }
-
-    vec3 trace(const Ray& ray) const {
-        float tMin = 1e20;
-        Surface* hitObj = nullptr;
-        vec3 normal;
-        for (auto obj : objects) {
-            vec3 tempNormal;
-            float t = obj->intersect(ray, tempNormal);
-            if (t > 0.0f && t < tMin) {
-                tMin = t;
-                normal = tempNormal;
-                hitObj = obj;
-            }
-        }
-        if (!hitObj) return vec3(0);
-
-        vec3 hitPos = ray.origin + tMin * ray.direction;
-
-        vec3 toLight = normalize(lightPos - hitPos);
-        Ray shadowRay(hitPos + 1e-4f * normal, toLight);
-        for (auto obj : objects) {
-            vec3 dummy;
-            float t = obj->intersect(shadowRay, dummy);
-            if (t > 0.0f) return hitObj->material.ka * lightColor;
-        }
-
-        vec3 viewDir = normalize(-ray.direction);
-        vec3 halfVec = normalize(toLight + viewDir);
-        float diff = max(dot(normal, toLight), 0.0f);
-        float spec = pow(max(dot(normal, halfVec), 0.0f), hitObj->material.specPower);
-        vec3 color = hitObj->material.ka + hitObj->material.kd * diff + hitObj->material.ks * spec;
-        return clamp(color * lightColor, 0.0f, 1.0f);
-    }
-};
-
-int Width = 512, Height = 512;
-std::vector<float> OutputImage;
-Camera* camera = nullptr;
-Scene* scene = nullptr;
-const float gammaValue = 2.2f;
-const int NUM_SAMPLES = 64;
-
-vec3 applyGammaCorrection(const vec3& color) {
-    return vec3(pow(color.r, 1.0f / gammaValue),
-        pow(color.g, 1.0f / gammaValue),
-        pow(color.b, 1.0f / gammaValue));
-}
-
-void render() {
-    OutputImage.resize(Width * Height * 3);
-    for (int j = 0; j < Height; ++j) {
-        for (int i = 0; i < Width; ++i) {
-            vec3 colorSum(0.0f);
-            for (int s = 0; s < NUM_SAMPLES; ++s) {
-                float dx = static_cast<float>(rand()) / RAND_MAX;
-                float dy = static_cast<float>(rand()) / RAND_MAX;
-                Ray ray = camera->generateRay(i + dx, j + dy, Width, Height);
-                vec3 sampleColor = scene->trace(ray);
-                colorSum += sampleColor;
-            }
-            vec3 finalColor = colorSum / float(NUM_SAMPLES);
-            finalColor = applyGammaCorrection(finalColor);
-            int idx = (j * Width + i) * 3;
-            OutputImage[idx + 0] = finalColor.r;
-            OutputImage[idx + 1] = finalColor.g;
-            OutputImage[idx + 2] = finalColor.b;
-        }
+    // bottom cap
+    int ringStart = (height - 2) * width;
+    for (int i = 0; i < width - 1; ++i) {
+        gIndexBuffer[idx++] = botIndex;
+        gIndexBuffer[idx++] = ringStart + (i + 1);
+        gIndexBuffer[idx++] = ringStart + i;
     }
 }
 
-void resize_callback(GLFWwindow*, int nw, int nh) {
-    Width = nw;
-    Height = nh;
-    glViewport(0, 0, nw, nh);
+// ------------------------------------------------------------------
+// Software rasterizer + Z-buffer
+// ------------------------------------------------------------------
+static int Width = 512, Height = 512;
+static std::vector<float> FrameBuffer;
+static std::vector<float> ZBuffer;
+
+void renderSoftware() {
+    FrameBuffer.assign(Width * Height * 3, 0.5f);
+    ZBuffer.assign(Width * Height, std::numeric_limits<float>::infinity());
+
+    mat4 Model = translate(mat4(1.0f), vec3(0, 0, -7)) * scale(mat4(1.0f), vec3(2.0f));
+    mat4 View = lookAt(vec3(0, 0, 0), vec3(0, 0, -1), vec3(0, 1, 0));
+    mat4 Projection = frustum(-0.1f, 0.1f, -0.1f, 0.1f, 0.1f, 1000.0f);
+    mat4 MVP = Projection * View * Model;
+
+    auto toScreen = [&](const vec4& v) {
+        vec4 p = v / v.w;
+        return vec3(
+            (p.x * 0.5f + 0.5f) * Width,
+            (p.y * 0.5f + 0.5f) * Height,
+            p.z
+        );
+        };
+    auto edge = [&](const vec3& A, const vec3& B, const vec2& P) {
+        return (P.x - A.x) * (B.y - A.y) - (P.y - A.y) * (B.x - A.x);
+        };
+
+    for (int t = 0; t < gNumTriangles; ++t) {
+        int i0 = gIndexBuffer[3 * t + 0],
+            i1 = gIndexBuffer[3 * t + 1],
+            i2 = gIndexBuffer[3 * t + 2];
+        vec3 P[3] = {
+            toScreen(MVP * vec4(gVertexBuffer[3 * i0 + 0], gVertexBuffer[3 * i0 + 1], gVertexBuffer[3 * i0 + 2], 1.0f)),
+            toScreen(MVP * vec4(gVertexBuffer[3 * i1 + 0], gVertexBuffer[3 * i1 + 1], gVertexBuffer[3 * i1 + 2], 1.0f)),
+            toScreen(MVP * vec4(gVertexBuffer[3 * i2 + 0], gVertexBuffer[3 * i2 + 1], gVertexBuffer[3 * i2 + 2], 1.0f))
+        };
+
+        float area = edge(P[0], P[1], vec2(P[2]));
+        if (fabs(area) < 1e-6f) continue;
+
+        int minX = std::max(0, int(std::floor(std::min({ P[0].x,P[1].x,P[2].x }))));
+        int maxX = std::min(Width - 1, int(std::ceil(std::max({ P[0].x,P[1].x,P[2].x }))));
+        int minY = std::max(0, int(std::floor(std::min({ P[0].y,P[1].y,P[2].y }))));
+        int maxY = std::min(Height - 1, int(std::ceil(std::max({ P[0].y,P[1].y,P[2].y }))));
+
+        for (int y = minY; y <= maxY; ++y) {
+            for (int x = minX; x <= maxX; ++x) {
+                vec2 p(x + 0.5f, y + 0.5f);
+                float w0 = edge(P[1], P[2], p) / area;
+                float w1 = edge(P[2], P[0], p) / area;
+                float w2 = edge(P[0], P[1], p) / area;
+                if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+                    float z = w0 * P[0].z + w1 * P[1].z + w2 * P[2].z;
+                    int idx = y * Width + x;
+                    if (z < ZBuffer[idx]) {
+                        ZBuffer[idx] = z;
+                        int off = idx * 3;
+                        FrameBuffer[off + 0] = 1.0f;
+                        FrameBuffer[off + 1] = 1.0f;
+                        FrameBuffer[off + 2] = 1.0f;
+                    }
+                }
+            }
+        }
+    }
+
+    // flip vertically when drawing
+    for (int row = 0; row < Height; ++row) {
+        float* ptr = FrameBuffer.data() + ((Height - 1 - row) * Width * 3);
+        glRasterPos2i(0, row);
+        glDrawPixels(Width, 1, GL_RGB, GL_FLOAT, ptr);
+    }
+}
+
+// window resize callback
+void framebuffer_size_callback(GLFWwindow*, int w, int h) {
+    Width = w; Height = h;
+    glViewport(0, 0, w, h);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glOrtho(0.0, Width, 0.0, Height, 1.0, -1.0);
-    OutputImage.reserve(Width * Height * 3);
-    render();
+    glOrtho(0, Width, 0, Height, 1, -1);
+    renderSoftware();
 }
 
-int main(int argc, char* argv[]) {
-    GLFWwindow* window;
+int main() {
     if (!glfwInit()) return -1;
-    window = glfwCreateWindow(Width, Height, "Q3: Anti-aliasing", NULL, NULL);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+
+    GLFWwindow* window = glfwCreateWindow(Width, Height, "HW5 Q1", nullptr, nullptr);
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    glewExperimental = true;
+    if (glewInit() != GLEW_OK) { glfwTerminate(); return -1; }
+
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glfwSetFramebufferSizeCallback(window, resize_callback);
 
-    camera = new Camera(vec3(0.0f, 0.0f, 0.0f), -0.1f, 0.1f, -0.1f, 0.1f, 0.1f);
-    scene = new Scene();
-
-    scene->objects.push_back(new Plane(-2.0f, { {0.2f,0.2f,0.2f}, {1,1,1}, {0,0,0}, 0 }));
-    scene->objects.push_back(new Sphere(vec3(-4, 0, -7), 1, { {0.2f,0,0}, {1,0,0}, {0,0,0}, 0 }));
-    scene->objects.push_back(new Sphere(vec3(0, 0, -7), 2, { {0,0.2f,0}, {0,0.5f,0}, {0.5f,0.5f,0.5f}, 32 }));
-    scene->objects.push_back(new Sphere(vec3(4, 0, -7), 1, { {0,0,0.2f}, {0,0,1}, {0,0,0}, 0 }));
-
-    resize_callback(NULL, Width, Height);
+    create_sphere();
+    renderSoftware();
 
     while (!glfwWindowShouldClose(window)) {
         glClear(GL_COLOR_BUFFER_BIT);
-        glDrawPixels(Width, Height, GL_RGB, GL_FLOAT, &OutputImage[0]);
+        renderSoftware();
         glfwSwapBuffers(window);
         glfwPollEvents();
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-            glfwSetWindowShouldClose(window, GL_TRUE);
     }
 
-    delete camera;
-    delete scene;
+    delete[] gVertexBuffer;
+    delete[] gIndexBuffer;
+    glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
 }
