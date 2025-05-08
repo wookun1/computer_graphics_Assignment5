@@ -1,21 +1,58 @@
-![image](https://github.com/user-attachments/assets/f70242b7-02b6-4d76-9b82-5699eb50971b)
-# 과제 2 - Q3: 안티 앨리어싱 (Anti-aliasing)
+![image](https://github.com/user-attachments/assets/9b3144a0-5e30-4ab9-a645-8dde9593ba5a)
 
- 과제 목표
-픽셀 경계에서 발생하는 **계단 현상(jaggies)**을 제거하고,  
-부드러운 렌더링 결과를 얻기 위해 **슈퍼샘플링 기반의 안티앨리어싱**을 구현합니다.
+# 과제 5 – Q1: 소프트웨어 래스터라이저 + Z-버퍼
+
+## 과제 목표  
+제공된 단위 구(unit‐sphere) 메시를 변환 및 투영하여,  
+소프트웨어 래스터라이저와 깊이(Z) 버퍼를 이용해 비하이라이트(언셰이디드) 구를 렌더링합니다. :contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
+
+---
+
+## 처리 순서
+
+1. **메시 생성**  
+   - `create_sphere(width=32, height=16)` 함수 내에서  
+     - 중간 고리 정점 생성: 위도 `θ` ∈ (0, π), 경도 `φ` ∈ [0, 2π)  
+     - 상·하 극점 추가  
+     - 측면(side) 삼각형 + 상단(top cap)·하단(bottom cap) 삼각형 인덱스 구축  
+
+2. **변환 파이프라인**  
+   ```cpp
+   mat4 Model      = translate(mat4(1.0f), vec3(0,0,-7))
+                    * scale    (mat4(1.0f), vec3(2.0f));    // 반경 2, 위치 (0,0,-7)
+   mat4 View       = lookAt  (vec3(0,0,0), vec3(0,0,-1), vec3(0,1,0));  // 카메라 at (0,0,0)
+   mat4 Projection = frustum (-0.1f,0.1f, -0.1f,0.1f, 0.1f, 1000.0f);   // 원근 투영
+   mat4 MVP        = Projection * View * Model;
 
 
+소프트웨어 래스터라이저 + Z-버퍼
 
-구현 방식: Supersampling (초과 샘플링)
+버퍼 초기화
+FrameBuffer.assign(512*512*3, 0.5f);                   // 회색 배경
+ZBuffer.assign   (512*512,   +∞);                      // 무한대로 초기화
 
- 핵심 아이디어
-1픽셀에 대해 단 1개의 ray만 쏘는 대신,  
-**64개의 무작위 ray**를 쏘고, **색상을 평균**내면  
-경계선이 부드럽고 계단 현상이 줄어듭니다.
+삼각형 순회 & 래스터
+for(int t=0; t<gNumTriangles; ++t) {
+  // 정점 3개 → 화면 좌표 P0,P1,P2
+  float area = edge(P0,P1,P2);
+  if(|area|<ε) continue;                               // 평평한 삼각형 스킵
 
- 적용 내용
-- 각 픽셀에 대해 64개의 랜덤 ray를 발사
-  ```cpp
-  float dx = random(0, 1), dy = random(0, 1);
-  Ray ray = camera->generateRay(i + dx, j + dy, width, height);
+  // 바운딩 박스
+  for(y=minY; y<=maxY; ++y)
+    for(x=minX; x<=maxX; ++x) {
+      // 람버트 면적 좌표 계산
+      if(w0>=0 && w1>=0 && w2>=0) {
+        z = w0*P0.z + w1*P1.z + w2*P2.z;
+        if(z < ZBuffer[y*512 + x]) {
+          ZBuffer[y*512 + x] = z;
+          FrameBuffer[(y*512+x)*3 + ...] = vec3(1.0f); // 흰색
+        }
+      }
+    }
+}
+
+
+결과 
+512×512 해상도의 회색 배경 위에,
+
+깊이 버퍼 기반으로 올바르게 가려진 흰색 구가 렌더됨
